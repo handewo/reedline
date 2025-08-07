@@ -21,7 +21,7 @@ chrono = { version = "0.4.19", default-features = false, features = [
     "serde",
 ] }
 crossbeam = { version = "0.8.2", optional = true }
-crossterm = { version = "0.28.1", features = ["serde"] }
+crossterm = { path = "/home/rick/crossterm/", features = ["serde"] }
 fd-lock = "4.0.2"
 itertools = "0.13.0"
 nu-ansi-term = "0.50.0"
@@ -34,6 +34,7 @@ strum_macros = "0.26"
 thiserror = "2.0.12"
 unicode-segmentation = "1.9.0"
 unicode-width = "0.2"
+tokio = {version ="1",optional= true,features=["sync"]}
 
 [dev-dependencies]
 gethostname = "0.4.0"
@@ -41,8 +42,10 @@ pretty_assertions = "1.4.0"
 rstest = { version = "0.23.0", default-features = false }
 tempfile = "3.3.0"
 
+
 [features]
 bashisms = []
+no-tty = ["crossterm/no-tty","tokio"]
 external_printer = ["crossbeam"]
 sqlite = ["rusqlite/bundled", "serde_json"]
 sqlite-dynlib = ["rusqlite", "serde_json"]

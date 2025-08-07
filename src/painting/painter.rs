@@ -48,7 +48,10 @@ fn skip_buffer_lines(string: &str, skip: usize, offset: Option<usize>) -> &str {
 }
 
 /// the type used by crossterm operations
+#[cfg(not(feature = "no-tty"))]
 pub type W = std::io::BufWriter<std::io::Stderr>;
+#[cfg(feature = "no-tty")]
+pub type W = std::io::BufWriter<crate::engine::SenderWriter>;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PainterSuspendedState {
@@ -98,10 +101,15 @@ pub struct Painter {
     large_buffer: bool,
     just_resized: bool,
     after_cursor_lines: Option<String>,
+    #[cfg(feature = "no-tty")]
+    term_backend: crossterm::event::NoTtyEvent,
 }
 
 impl Painter {
-    pub(crate) fn new(stdout: W) -> Self {
+    pub(crate) fn new(
+        stdout: W,
+        #[cfg(feature = "no-tty")] term_backend: crossterm::event::NoTtyEvent,
+    ) -> Self {
         Painter {
             stdout,
             prompt_start_row: 0,
@@ -111,6 +119,8 @@ impl Painter {
             large_buffer: false,
             just_resized: false,
             after_cursor_lines: None,
+            #[cfg(feature = "no-tty")]
+            term_backend,
         }
     }
 
@@ -162,7 +172,12 @@ impl Painter {
     ) -> Result<()> {
         // Update the terminal size
         self.terminal_size = {
+            #[cfg(not(feature = "no-tty"))]
             let size = terminal::size()?;
+
+            #[cfg(feature = "no-tty")]
+            let size = terminal::size(&self.term_backend)?;
+
             // if reported size is 0, 0 -
             // use a default size to avoid divide by 0 panics
             if size == (0, 0) {
@@ -171,7 +186,12 @@ impl Painter {
                 size
             }
         };
+        #[cfg(not(feature = "no-tty"))]
         let prompt_selector = select_prompt_row(suspended_state, cursor::position()?);
+
+        #[cfg(feature = "no-tty")]
+        let prompt_selector =
+            select_prompt_row(suspended_state, cursor::position(&self.term_backend)?);
         self.prompt_start_row = match prompt_selector {
             PromptRowSelector::UseExistingPrompt { start_row } => start_row,
             PromptRowSelector::MakeNewPrompt { new_row } => {
@@ -206,6 +226,7 @@ impl Painter {
         prompt_mode: PromptEditMode,
         menu: Option<&ReedlineMenu>,
         use_ansi_coloring: bool,
+        disable_echo: bool,
         cursor_config: &Option<CursorConfig>,
     ) -> Result<()> {
         self.stdout.queue(cursor::Hide)?;
@@ -233,10 +254,16 @@ impl Painter {
         self.large_buffer = required_lines >= screen_height;
 
         // This might not be terribly performant. Testing it out
+        #[cfg(not(feature = "no-tty"))]
         let is_reset = || match cursor::position() {
             // when output something without newline, the cursor position is at current line.
             // but the prompt_start_row is next line.
             // in this case we don't want to reset, need to `add 1` to handle for such case.
+            Ok(position) => position.1 + 1 < self.prompt_start_row,
+            Err(_) => false,
+        };
+        #[cfg(feature = "no-tty")]
+        let is_reset = || match cursor::position(&self.term_backend) {
             Ok(position) => position.1 + 1 < self.prompt_start_row,
             Err(_) => false,
         };
@@ -262,7 +289,7 @@ impl Painter {
         if self.large_buffer {
             self.print_large_buffer(prompt, lines, menu, use_ansi_coloring)?;
         } else {
-            self.print_small_buffer(prompt, lines, menu, use_ansi_coloring)?;
+            self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, disable_echo)?;
         }
 
         // The last_required_lines is used to calculate safe range of the current prompt.
@@ -350,6 +377,7 @@ impl Painter {
         lines: &PromptLines,
         menu: Option<&ReedlineMenu>,
         use_ansi_coloring: bool,
+        disable_echo: bool,
     ) -> Result<()> {
         // print our prompt with color
         if use_ansi_coloring {
@@ -381,10 +409,12 @@ impl Painter {
                 .queue(ResetColor)?;
         }
 
-        self.stdout
-            .queue(Print(&lines.before_cursor))?
-            .queue(SavePosition)?
-            .queue(Print(&lines.after_cursor))?;
+        if !disable_echo {
+            self.stdout
+                .queue(Print(&lines.before_cursor))?
+                .queue(SavePosition)?
+                .queue(Print(&lines.after_cursor))?;
+        }
 
         if let Some(menu) = menu {
             self.print_menu(menu, lines, use_ansi_coloring)?;
@@ -517,7 +547,13 @@ impl Painter {
         //
         // I assume this is a bug with the position() call but haven't figured that
         // out yet.
+        #[cfg(not(feature = "no-tty"))]
         if let Ok(position) = cursor::position() {
+            self.prompt_start_row = position.1;
+            self.just_resized = true;
+        }
+        #[cfg(feature = "no-tty")]
+        if let Ok(position) = cursor::position(&self.term_backend) {
             self.prompt_start_row = position.1;
             self.just_resized = true;
         }
