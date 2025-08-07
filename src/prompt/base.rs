@@ -245,7 +245,7 @@ impl IntoDiscriminant for PromptEditMode {
 ///
 /// Implementors have to provide [`str`]-based content which will be
 /// displayed before the `LineBuffer` is drawn.
-pub trait Prompt: Send {
+pub trait Prompt: Send + crate::MaybeSendSync {
     /// Provide content of the left full prompt
     fn render_prompt_left(&self) -> Cow<'_, str>;
     /// Provide content of the right full prompt

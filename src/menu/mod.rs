@@ -74,7 +74,7 @@ pub enum MenuEvent {
 }
 
 /// Trait that defines how a menu will be printed by the painter
-pub trait Menu: Send {
+pub trait Menu: Send + crate::MaybeSendSync {
     /// Get MenuSettings
     fn settings(&self) -> &MenuSettings {
         // We panic here, so this function has base implementation

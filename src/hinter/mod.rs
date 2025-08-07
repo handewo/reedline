@@ -30,7 +30,7 @@ pub fn get_first_token(string: &str) -> String {
 use crate::History;
 /// A trait that's responsible for returning the hint for the current line and position
 /// Hints are often shown in-line as part of the buffer, showing the user text they can accept or ignore
-pub trait Hinter: Send {
+pub trait Hinter: Send + crate::MaybeSendSync {
     /// Handle the hinting duty by using the line, position, and current history
     ///
     /// Returns the formatted output to show the user

@@ -86,8 +86,19 @@ fn skip_buffer_lines_range(string: &str, skip: usize, offset: Option<usize>) -> 
 pub enum W {
     /// Buffered stderr — the real terminal.
     // Constructed only in non-test builds; under `cfg(test)` we always use `Sink`.
+    #[cfg(not(feature = "no-tty"))]
     #[cfg_attr(test, allow(dead_code))]
     Terminal(std::io::BufWriter<std::io::Stderr>),
+    /// Under `no-tty`, crossterm's [`SenderWriter`](crossterm::event::SenderWriter)
+    /// is async-only (no `std::io::Write`), so we accumulate queued ANSI bytes in
+    /// `buf` synchronously and drain them asynchronously in [`W::flush_out`].
+    #[cfg(feature = "no-tty")]
+    #[cfg_attr(test, allow(dead_code))]
+    Terminal {
+        term_backend: crossterm::event::NoTtyEvent,
+        sender: crossterm::event::SenderWriter,
+        buf: Vec<u8>,
+    },
     /// Discards all output, used in tests.
     #[cfg(test)]
     Sink(std::io::Sink),
@@ -100,9 +111,23 @@ pub enum W {
 
 impl W {
     /// Writer targeting the real terminal (buffered stderr).
+    #[cfg(not(feature = "no-tty"))]
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn terminal() -> Self {
         W::Terminal(std::io::BufWriter::new(std::io::stderr()))
+    }
+
+    #[cfg(feature = "no-tty")]
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn terminal(
+        term_backend: crossterm::event::NoTtyEvent,
+        sender: crossterm::event::SenderWriter,
+    ) -> Self {
+        W::Terminal {
+            term_backend,
+            sender,
+            buf: Vec::new(),
+        }
     }
 
     /// Writer that discards everything, for tests that exercise painting
@@ -132,7 +157,15 @@ impl W {
 impl Write for W {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         match self {
+            #[cfg(not(feature = "no-tty"))]
             W::Terminal(w) => w.write(buf),
+            // Buffer synchronously; the async `flush_out` drains this to the
+            // channel-backed `SenderWriter`.
+            #[cfg(feature = "no-tty")]
+            W::Terminal { buf: b, .. } => {
+                b.extend_from_slice(buf);
+                Ok(buf.len())
+            }
             #[cfg(test)]
             W::Sink(w) => w.write(buf),
             #[cfg(test)]
@@ -142,7 +175,12 @@ impl Write for W {
 
     fn flush(&mut self) -> Result<()> {
         match self {
+            #[cfg(not(feature = "no-tty"))]
             W::Terminal(w) => w.flush(),
+            // No-op here: real draining happens in the async `flush_out`. The
+            // sync `Write::flush` is still used by the test writers below.
+            #[cfg(feature = "no-tty")]
+            W::Terminal { .. } => Ok(()),
             #[cfg(test)]
             W::Sink(w) => w.flush(),
             #[cfg(test)]
@@ -157,11 +195,57 @@ impl W {
     /// Only the real terminal can answer, but test writers return an error so
     /// paint paths take their "no answer" branch instead of waiting on a tty
     /// that will never reply.
-    pub(crate) fn cursor_position(&self) -> Result<(u16, u16)> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn cursor_position(&self) -> Result<(u16, u16)> {
         match self {
+            #[cfg(not(feature = "no-tty"))]
             W::Terminal(_) => cursor::position(),
+            #[cfg(feature = "no-tty")]
+            W::Terminal {
+                term_backend,
+                sender: _,
+                buf: _,
+            } => cursor::position(term_backend).await,
             #[cfg(test)]
             W::Sink(_) | W::Capture(_) => Err(std::io::Error::other("no terminal attached")),
+        }
+    }
+    /// Flush queued output to the terminal.
+    ///
+    /// In the sync (non-`no-tty`) build this just flushes the underlying writer.
+    /// Under `no-tty` it drains the accumulated byte buffer to the async
+    /// [`SenderWriter`](crossterm::event::SenderWriter) via `write_all`.
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn flush_out(&mut self) -> Result<()> {
+        #[cfg(not(feature = "no-tty"))]
+        {
+            self.flush()
+        }
+        #[cfg(feature = "no-tty")]
+        {
+            match self {
+                W::Terminal {
+                    term_backend: _,
+                    sender,
+                    buf,
+                } => {
+                    if !buf.is_empty() {
+                        sender.write_all(buf).await?;
+                        buf.clear();
+                    }
+                    Ok(())
+                }
+                #[cfg(test)]
+                W::Sink(w) => w.flush(),
+                #[cfg(test)]
+                W::Capture(w) => w.flush(),
+            }
         }
     }
 }
@@ -312,10 +396,15 @@ pub struct Painter {
     semantic_markers: Option<Box<dyn SemanticPromptMarkers>>,
     /// Layout computed during the last paint cycle.
     pub(crate) last_layout: Option<PromptLayout>,
+    #[cfg(feature = "no-tty")]
+    term_backend: crossterm::event::NoTtyEvent,
 }
 
 impl Painter {
-    pub(crate) fn new(stdout: W) -> Self {
+    pub(crate) fn new(
+        stdout: W,
+        #[cfg(feature = "no-tty")] term_backend: crossterm::event::NoTtyEvent,
+    ) -> Self {
         Painter {
             stdout,
             prompt_start_row: PromptStartRow::Unverified,
@@ -327,6 +416,8 @@ impl Painter {
             after_cursor_lines: None,
             semantic_markers: None,
             last_layout: None,
+            #[cfg(feature = "no-tty")]
+            term_backend,
         }
     }
 
@@ -481,13 +572,22 @@ impl Painter {
     ///
     /// Not to be used for resizes during a running line editor, use
     /// [`Painter::handle_resize()`] instead
-    pub(crate) fn initialize_prompt_position(
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn initialize_prompt_position(
         &mut self,
         suspended_state: Option<&PainterSuspendedState>,
     ) -> Result<()> {
         // Update the terminal size
         self.terminal_size = {
+            #[cfg(not(feature = "no-tty"))]
             let size = terminal::size()?;
+
+            #[cfg(feature = "no-tty")]
+            let size = terminal::size(&self.term_backend)?;
+
             // if reported size is 0, 0 -
             // use a default size to avoid divide by 0 panics
             if size == (0, 0) {
@@ -496,7 +596,8 @@ impl Painter {
                 size
             }
         };
-        let prompt_selector = select_prompt_row(suspended_state, self.stdout.cursor_position()?);
+        let prompt_selector =
+            select_prompt_row(suspended_state, self.stdout.cursor_position().await?);
         let new_row = match prompt_selector {
             PromptRowSelector::UseExistingPrompt { start_row } => start_row,
             PromptRowSelector::MakeNewPrompt { new_row } => {
@@ -505,7 +606,7 @@ impl Painter {
                 // Otherwise printing the prompt would scroll off the stored prompt
                 // origin, causing issues after repaints.
                 if new_row == self.screen_height() {
-                    self.print_crlf()?;
+                    self.print_crlf().await?;
                     new_row.saturating_sub(1)
                 } else {
                     new_row
@@ -536,10 +637,14 @@ impl Painter {
     ///
     /// Note. The `ScrollUp` operation in `crossterm` deletes lines from the top of
     /// the screen.
-    pub(crate) fn repaint_buffer(
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn repaint_buffer(
         &mut self,
         prompt: &dyn Prompt,
-        lines: &PromptLines,
+        lines: &PromptLines<'_>,
         prompt_mode: PromptEditMode,
         menu: Option<&ReedlineMenu>,
         use_ansi_coloring: bool,
@@ -582,7 +687,7 @@ impl Painter {
             // homing to row 0, which would yank the prompt to the top. The `+1`
             // allows for output that left the cursor on the prompt row.
             // See nushell/reedline#1130.
-            let anchor = match self.stdout.cursor_position() {
+            let anchor = match self.stdout.cursor_position().await {
                 Ok((_, cursor_row)) if cursor_row + 1 < row => cursor_row,
                 _ => row,
             };
@@ -667,7 +772,7 @@ impl Painter {
         }
         self.stdout.queue(cursor::Show)?;
 
-        self.stdout.flush()
+        self.stdout.flush_out().await
     }
 
     /// Captures the current screen layout into a [`RenderSnapshot`] that records
@@ -1143,7 +1248,11 @@ impl Painter {
     }
 
     /// Updates prompt origin and offset to handle a screen resize event
-    pub(crate) fn handle_resize(&mut self, width: u16, height: u16) {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn handle_resize(&mut self, width: u16, height: u16) {
         self.terminal_size = (width, height);
 
         self.invalidate_prompt_start_row();
@@ -1157,7 +1266,7 @@ impl Painter {
         // Known bug: on iterm2 and kitty, clearing the screen via CMD-K
         // doesn't reset the cursor position — possibly a `position()`
         // bug.
-        if let Ok(position) = self.stdout.cursor_position() {
+        if let Ok(position) = self.stdout.cursor_position().await {
             self.prompt_start_row = PromptStartRow::Stale(position.1);
             self.just_resized = true;
         }
@@ -1166,40 +1275,85 @@ impl Painter {
     /// Writes `line` to the terminal followed by `\r\n` and
     /// invalidates the cached prompt anchor since the line scrolls the
     /// terminal independently of the painter.
-    pub(crate) fn paint_line(&mut self, line: &str) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn paint_line(&mut self, line: &str) -> Result<()> {
         // Invalidate up front: a partial write below can still leave
         // bytes in the kernel/tty buffer and displace the cursor.
         self.invalidate_prompt_start_row();
         self.stdout.queue(Print(line))?.queue(Print("\r\n"))?;
-        self.stdout.flush()
+        self.stdout.flush_out().await
     }
 
     /// Goes to the beginning of the next line
     ///
     /// Also works in raw mode
-    pub(crate) fn print_crlf(&mut self) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn print_crlf(&mut self) -> Result<()> {
         self.stdout.queue(Print("\r\n"))?;
 
-        self.stdout.flush()
+        self.stdout.flush_out().await
     }
 
     /// Clear the screen by printing enough whitespace to start the prompt or
     /// other output back at the first line of the terminal.
-    pub(crate) fn clear_screen(&mut self) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn clear_screen(&mut self) -> Result<()> {
         self.stdout
             .queue(Clear(ClearType::All))?
-            .queue(MoveTo(0, 0))?
-            .flush()?;
-        self.initialize_prompt_position(None)
+            .queue(MoveTo(0, 0))?;
+        self.stdout.flush_out().await?;
+        self.initialize_prompt_position(None).await
     }
 
-    pub(crate) fn clear_scrollback(&mut self) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn clear_scrollback(&mut self) -> Result<()> {
         self.stdout
             .queue(Clear(ClearType::All))?
             .queue(Clear(ClearType::Purge))?
-            .queue(MoveTo(0, 0))?
-            .flush()?;
-        self.initialize_prompt_position(None)
+            .queue(MoveTo(0, 0))?;
+        self.stdout.flush_out().await?;
+        self.initialize_prompt_position(None).await
+    }
+
+    /// Restore the default cursor shape and ensure the cursor is shown.
+    ///
+    /// A TTY build does this from `Reedline`'s `Drop`, but under `no-tty` the
+    /// channel-backed writer is async-only, so the engine calls this at the end
+    /// of the async `read_line` instead.
+    #[cfg(feature = "no-tty")]
+    pub(crate) fn restore_cursor_shape(&mut self) -> Result<()> {
+        use crossterm::cursor::{SetCursorStyle, Show};
+        self.stdout
+            .queue(SetCursorStyle::DefaultUserShape)?
+            .queue(Show)?;
+
+        let W::Terminal {
+            term_backend: _,
+            sender,
+            ref mut buf,
+        } = &mut self.stdout;
+
+        let sender = sender.clone();
+        let buf: Vec<_> = std::mem::take(buf);
+        if !buf.is_empty() {
+            let h = std::thread::spawn(move || {
+                let _ = sender.blocking_write_all(&buf);
+            });
+            let _ = h.join();
+        }
+        Ok(())
     }
 
     /// Park the cursor below the entry on the way out of `read_line`.
@@ -1209,12 +1363,16 @@ impl Painter {
     /// unconditional and only the after-cursor text goes back. Text before the
     /// cursor survives, leaving a rejected command on screen as the record of
     /// what was aborted (#1143).
-    pub(crate) fn move_cursor_to_end(&mut self) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
+    )]
+    pub(crate) async fn move_cursor_to_end(&mut self) -> Result<()> {
         self.stdout.queue(Clear(ClearType::FromCursorDown))?;
         if let Some(after_cursor) = &self.after_cursor_lines {
             self.stdout.queue(Print(after_cursor))?;
         }
-        self.print_crlf()
+        self.print_crlf().await
     }
 
     /// Prints an external message
@@ -1281,7 +1439,7 @@ impl Painter {
         // batch of messages, not per message, so the flicker the comment above
         // guards against is unaffected.
         self.stdout.flush()?;
-        self.prompt_start_row = match self.stdout.cursor_position() {
+        self.prompt_start_row = match self.stdout.cursor_position().await {
             // Measured, so later paints can skip the drift check.
             Ok((_, actual)) => PromptStartRow::Verified(actual),
             // No answer, so all that is left is the count this function stopped
@@ -1329,6 +1487,7 @@ impl Painter {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "no-tty"))]
 mod tests {
     use super::*;
     use crate::menu::MenuEvent;

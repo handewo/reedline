@@ -20,7 +20,11 @@ chrono = { version = "0.4.19", default-features = false, features = [
     "clock",
     "serde",
 ] }
-crossterm = { version = "0.29.0", features = ["serde"] }
+crossterm = { git = "https://github.com/handewo/crossterm.git", features = [
+    "serde",
+] }
+bytes = { version = "1", optional = true }
+maybe-async-cfg = "0.2.5"
 fd-lock = "4.0.2"
 itertools = "0.15.0"
 nu-ansi-term = "0.50.0"
@@ -33,13 +37,20 @@ thiserror = "2.0.19"
 unicase = "2.8.0"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2"
+tokio = { version = "1", optional = true }
 
 [dev-dependencies]
 gethostname = "1.1.0"
+bytes = "1"
 pretty_assertions = "1.4.0"
 rstest = { version = "0.26.1", default-features = false }
 serde_json = "1.0"
 tempfile = "3.3.0"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+russh = "0.61"
+rand = "0.10"
+anyhow = "1"
+
 
 [features]
 default = []
@@ -49,6 +60,7 @@ sqlite = ["rusqlite/bundled", "serde_json", "_sqlite"]
 sqlite-dynlib = ["rusqlite", "serde_json", "_sqlite"]
 # Internal marker enabled by both sqlite features; never enable it directly.
 _sqlite = []
+no-tty = ["crossterm/no-tty", "dep:bytes", "dep:tokio"]
 system_clipboard = ["arboard"]
 libc = ["crossterm/libc"]
 
@@ -59,6 +71,10 @@ required-features = ["sqlite"]
 [[example]]
 name = "external_printer"
 required-features = ["external_printer"]
+
+[[example]]
+name = "ssh_demo"
+required-features = ["no-tty"]
 
 [package.metadata.docs.rs]
 # Whether to pass `--all-features` to Cargo (default: false)

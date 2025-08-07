@@ -21,7 +21,7 @@ pub enum AbbrExpandContext {
 
 /// The syntax highlighting trait. Implementers of this trait will take in the current string and then
 /// return a `StyledText` object, which represents the contents of the original line as styled strings
-pub trait Highlighter: Send {
+pub trait Highlighter: Send + crate::MaybeSendSync {
     /// The action that will handle the current buffer as a line and return the corresponding `StyledText` for the buffer
     ///
     /// Cursor position as byte offsets in the string
