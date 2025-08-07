@@ -85,8 +85,12 @@ fn skip_buffer_lines_range(string: &str, skip: usize, offset: Option<usize>) -> 
 pub enum W {
     /// Buffered stderr — the real terminal.
     // Constructed only in non-test builds; under `cfg(test)` we always use `Sink`.
+    #[cfg(not(feature = "no-tty"))]
     #[cfg_attr(test, allow(dead_code))]
     Terminal(std::io::BufWriter<std::io::Stderr>),
+    #[cfg(feature = "no-tty")]
+    #[cfg_attr(test, allow(dead_code))]
+    Terminal(std::io::BufWriter<crate::engine::SenderWriter>),
     /// Discards all output, used in tests.
     #[cfg(test)]
     Sink(std::io::Sink),
@@ -99,9 +103,16 @@ pub enum W {
 
 impl W {
     /// Writer targeting the real terminal (buffered stderr).
+    #[cfg(not(feature = "no-tty"))]
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn terminal() -> Self {
         W::Terminal(std::io::BufWriter::new(std::io::stderr()))
+    }
+
+    #[cfg(feature = "no-tty")]
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn terminal(sender: crate::engine::SenderWriter) -> Self {
+        W::Terminal(std::io::BufWriter::new(sender))
     }
 
     /// Writer that discards everything, for tests that exercise painting
@@ -290,10 +301,15 @@ pub struct Painter {
     semantic_markers: Option<Box<dyn SemanticPromptMarkers>>,
     /// Layout computed during the last paint cycle.
     pub(crate) last_layout: Option<PromptLayout>,
+    #[cfg(feature = "no-tty")]
+    term_backend: crossterm::event::NoTtyEvent,
 }
 
 impl Painter {
-    pub(crate) fn new(stdout: W) -> Self {
+    pub(crate) fn new(
+        stdout: W,
+        #[cfg(feature = "no-tty")] term_backend: crossterm::event::NoTtyEvent,
+    ) -> Self {
         Painter {
             stdout,
             prompt_start_row: PromptStartRow::Unverified,
@@ -305,6 +321,8 @@ impl Painter {
             after_cursor_lines: None,
             semantic_markers: None,
             last_layout: None,
+            #[cfg(feature = "no-tty")]
+            term_backend,
         }
     }
 
@@ -462,7 +480,12 @@ impl Painter {
     ) -> Result<()> {
         // Update the terminal size
         self.terminal_size = {
+            #[cfg(not(feature = "no-tty"))]
             let size = terminal::size()?;
+
+            #[cfg(feature = "no-tty")]
+            let size = terminal::size(&self.term_backend)?;
+
             // if reported size is 0, 0 -
             // use a default size to avoid divide by 0 panics
             if size == (0, 0) {
@@ -471,7 +494,11 @@ impl Painter {
                 size
             }
         };
+        #[cfg(not(feature = "no-tty"))]
         let prompt_selector = select_prompt_row(suspended_state, cursor::position()?);
+        #[cfg(feature = "no-tty")]
+        let prompt_selector =
+            select_prompt_row(suspended_state, cursor::position(&self.term_backend)?);
         let new_row = match prompt_selector {
             PromptRowSelector::UseExistingPrompt { start_row } => start_row,
             PromptRowSelector::MakeNewPrompt { new_row } => {
@@ -518,6 +545,7 @@ impl Painter {
         prompt_mode: PromptEditMode,
         menu: Option<&ReedlineMenu>,
         use_ansi_coloring: bool,
+        disable_echo: bool,
         cursor_config: &Option<CursorConfig>,
     ) -> Result<()> {
         // Reset any ANSI styling that may have been left by external commands
@@ -612,7 +640,14 @@ impl Painter {
         if self.large_buffer {
             self.print_large_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?;
         } else {
-            self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?;
+            self.print_small_buffer(
+                prompt,
+                lines,
+                menu,
+                use_ansi_coloring,
+                &layout,
+                disable_echo,
+            )?;
         }
 
         self.last_layout = Some(layout);
@@ -904,6 +939,7 @@ impl Painter {
         menu: Option<&ReedlineMenu>,
         use_ansi_coloring: bool,
         layout: &PromptLayout,
+        disable_echo: bool,
     ) -> Result<()> {
         // Emit prompt start marker (OSC 133;A;k=i for primary prompt)
         if let Some(markers) = &self.semantic_markers {
@@ -946,10 +982,12 @@ impl Painter {
                 .queue(ResetColor)?;
         }
 
-        self.stdout
-            .queue(Print(&lines.before_cursor))?
-            .queue(SavePosition)?
-            .queue(Print(&lines.after_cursor))?;
+        if !disable_echo {
+            self.stdout
+                .queue(Print(&lines.before_cursor))?
+                .queue(SavePosition)?
+                .queue(Print(&lines.after_cursor))?;
+        }
 
         if let Some(menu) = menu {
             self.print_menu(menu, use_ansi_coloring, layout)?;
@@ -1074,8 +1112,14 @@ impl Painter {
         // bug.
         #[cfg(not(test))]
         {
+            #[cfg(not(feature = "no-tty"))]
             if let Ok(position) = cursor::position() {
                 self.prompt_start_row = PromptStartRow::Stale(position.1);
+                self.just_resized = true;
+            }
+            #[cfg(feature = "no-tty")]
+            if let Ok(position) = cursor::position(&self.term_backend) {
+                self.prompt_start_row = position.1;
                 self.just_resized = true;
             }
         }
@@ -1725,7 +1769,7 @@ mod tests {
         let layout = painter.compute_layout(&lines, None);
 
         painter
-            .print_small_buffer(&prompt, &lines, None, false, &layout)
+            .print_small_buffer(&prompt, &lines, None, false, &layout, false)
             .expect("print_small_buffer failed");
 
         let recorded = calls.lock().expect("marker lock poisoned").clone();

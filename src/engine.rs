@@ -213,6 +213,14 @@ pub struct Reedline {
     // Only used when external_printer or idle_callback is configured.
     poll_interval: Duration,
 
+    disable_echo: bool,
+
+    #[cfg(feature = "no-tty")]
+    term_backend: crossterm::event::NoTtyEvent,
+
+    #[cfg(feature = "no-tty")]
+    stdout: SenderWriter,
+
     #[cfg(feature = "external_printer")]
     external_printer: Option<ExternalPrinter<String>>,
 
@@ -229,12 +237,20 @@ struct BufferEditor {
 
 impl Drop for Reedline {
     fn drop(&mut self) {
+        #[cfg(not(feature = "no-tty"))]
         if self.cursor_shapes.is_some() {
             let _ignore = terminal::enable_raw_mode();
             let mut stdout = std::io::stdout();
             let _ignore = stdout.queue(SetCursorStyle::DefaultUserShape);
             let _ignore = stdout.queue(Show);
             let _ignore = stdout.flush();
+        }
+        #[cfg(feature = "no-tty")]
+        if self.cursor_shapes.is_some() {
+            let _ignore = terminal::enable_raw_mode();
+            let _ignore = self.stdout.queue(SetCursorStyle::DefaultUserShape);
+            let _ignore = self.stdout.queue(Show);
+            let _ignore = self.stdout.flush();
         }
 
         // Ensures that the terminal is in a good state if we panic semigracefully
@@ -248,9 +264,17 @@ impl Reedline {
 
     /// Create a new [`Reedline`] engine with a local [`History`] that is not synchronized to a file.
     #[must_use]
-    pub fn create() -> Self {
+    pub fn create(
+        #[cfg(feature = "no-tty")] term_backend: crossterm::event::NoTtyEvent,
+        #[cfg(feature = "no-tty")] sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) -> Self {
+        #[cfg(feature = "no-tty")]
+        let stdout = SenderWriter(sender);
+
         let history = Box::<FileBackedHistory>::default();
-        #[cfg(not(test))]
+        #[cfg(all(not(test), not(feature = "no-tty")))]
+        let painter = Painter::new(W::terminal());
+        #[cfg(all(not(test), feature = "no-tty"))]
         let painter = Painter::new(W::terminal());
         #[cfg(test)]
         let painter = Painter::new(W::sink());
@@ -300,6 +324,11 @@ impl Reedline {
             immediately_accept: false,
             break_signal: None,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            disable_echo: false,
+            #[cfg(feature = "no-tty")]
+            term_backend,
+            #[cfg(feature = "no-tty")]
+            stdout,
             #[cfg(feature = "external_printer")]
             external_printer: None,
             #[cfg(feature = "idle_callback")]
@@ -326,6 +355,7 @@ impl Reedline {
     ///
     /// At this point most terminals should support it or ignore the setting of the necessary
     /// flags. For full compatibility, keep it disabled.
+    #[cfg(not(feature = "no-tty"))]
     pub fn use_bracketed_paste(mut self, enable: bool) -> Self {
         self.bracketed_paste.set(enable);
         self
@@ -464,6 +494,12 @@ impl Reedline {
             self.painter
                 .set_semantic_markers(Some(Osc133ClickEventsMarkers::boxed()));
         }
+        self
+    }
+
+    #[must_use]
+    pub fn with_disable_echo(mut self, disable_echo: bool) -> Self {
+        self.disable_echo = disable_echo;
         self
     }
 
@@ -931,17 +967,33 @@ impl Reedline {
 
                 if needs_polling {
                     if event::poll(self.poll_interval)? {
+                        #[cfg(not(feature = "no-tty"))]
                         events.push(crossterm::event::read()?);
+
+                        #[cfg(feature = "no-tty")]
+                        events.push(crossterm::event::read(&self.term_backend)?);
                     }
                 } else {
                     // Block until we receive an event
+                    #[cfg(not(feature = "no-tty"))]
                     events.push(crossterm::event::read()?);
+
+                    #[cfg(feature = "no-tty")]
+                    events.push(crossterm::event::read(&self.term_backend)?);
                 }
 
                 // Receive all events in the queue without blocking. Will stop when
                 // a line of input is completed.
+                #[cfg(not(feature = "no-tty"))]
                 while !completed(&events) && event::poll(Duration::from_millis(0))? {
                     events.push(crossterm::event::read()?);
+                }
+
+                #[cfg(feature = "no-tty")]
+                while !completed(&events)
+                    && event::poll(&self.term_backend, Duration::from_millis(0))?
+                {
+                    events.push(crossterm::event::read(&self.term_backend)?);
                 }
 
                 // If we believe there's text pasting or resizing going on, batch
@@ -949,8 +1001,14 @@ impl Reedline {
                 if events.len() > EVENTS_THRESHOLD
                     || events.iter().any(|e| matches!(e, Event::Resize(_, _)))
                 {
+                    #[cfg(not(feature = "no-tty"))]
                     while !completed(&events) && event::poll(POLL_WAIT)? {
                         events.push(crossterm::event::read()?);
+                    }
+
+                    #[cfg(feature = "no-tty")]
+                    while !completed(&events) && event::poll(&self.term_backend, POLL_WAIT)? {
+                        events.push(crossterm::event::read(&self.term_backend)?);
                     }
                 }
             }
@@ -2143,6 +2201,7 @@ impl Reedline {
                 self.prompt_edit_mode(),
                 None,
                 self.use_ansi_coloring,
+                self.disable_echo,
                 &self.cursor_shapes,
             )?;
         }
@@ -2227,6 +2286,7 @@ impl Reedline {
             self.prompt_edit_mode(),
             menu,
             self.use_ansi_coloring,
+            self.disable_echo,
             &self.cursor_shapes,
         )?;
 
@@ -2369,6 +2429,26 @@ impl Reedline {
     }
 }
 
+#[derive(Clone)]
+#[cfg(feature = "no-tty")]
+pub(crate) struct SenderWriter(tokio::sync::mpsc::Sender<Vec<u8>>);
+
+#[cfg(feature = "no-tty")]
+impl std::io::Write for SenderWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .blocking_send(buf.to_vec())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // mpsc is unbuffered; nothing to flush
+        Ok(())
+    }
+}
+
+#[cfg(not(feature = "no-tty"))]
 #[cfg(test)]
 mod tests {
     use super::*;
