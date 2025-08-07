@@ -31,6 +31,7 @@ impl KittyProtocolGuard {
 
         self.enabled = enable && self.support_kitty_protocol.unwrap_or(false);
     }
+    #[cfg(not(feature = "no-tty"))]
     pub fn enter(&mut self) {
         if self.enabled && !self.active {
             let _ = execute!(
@@ -43,6 +44,7 @@ impl KittyProtocolGuard {
             self.active = true;
         }
     }
+    #[cfg(not(feature = "no-tty"))]
     pub fn exit(&mut self) {
         if self.active {
             let _ = execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);

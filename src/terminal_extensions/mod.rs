@@ -9,5 +9,8 @@ pub(crate) mod tty_mode;
 ///
 /// SIDE EFFECT: Touches the terminal file descriptors
 pub fn kitty_protocol_available() -> bool {
-    crossterm::terminal::supports_keyboard_enhancement().unwrap_or_default()
+    #[cfg(not(feature = "no-tty"))]
+    return crossterm::terminal::supports_keyboard_enhancement().unwrap_or_default();
+    #[cfg(feature = "no-tty")]
+    return false;
 }
