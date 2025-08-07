@@ -21,7 +21,7 @@ chrono = { version = "0.4.19", default-features = false, features = [
     "serde",
 ] }
 crossbeam = { version = "0.8.2", optional = true }
-crossterm = { path = "/home/rick/crossterm/", features = ["serde"] }
+crossterm = { git = "https://github.com/handewo/crossterm.git", features = ["serde"] }
 fd-lock = "4.0.2"
 itertools = "0.13.0"
 nu-ansi-term = "0.50.0"
