@@ -1562,7 +1562,11 @@ impl Reedline {
 
         // Run the commands over the edit buffer
         for command in commands {
-            self.editor.run_edit_command(command);
+            if self.disable_echo {
+                self.editor.run_edit_command_insert(command);
+            } else {
+                self.editor.run_edit_command(command);
+            }
         }
     }
 

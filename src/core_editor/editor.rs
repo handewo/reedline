@@ -46,6 +46,15 @@ impl Editor {
         self.update_undo_state(undo_behavior);
     }
 
+    pub(crate) fn run_edit_command_insert(&mut self, command: &EditCommand) {
+        match command {
+            EditCommand::InsertChar(c) => self.insert_char(*c),
+            EditCommand::InsertString(str) => self.insert_str(str),
+            EditCommand::Clear => self.line_buffer.clear(),
+            _ => {}
+        }
+    }
+
     pub(crate) fn run_edit_command(&mut self, command: &EditCommand) {
         match command {
             EditCommand::MoveToStart { select } => self.move_to_start(*select),
