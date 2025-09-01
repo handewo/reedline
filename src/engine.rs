@@ -219,11 +219,8 @@ impl Reedline {
     #[must_use]
     pub fn create(
         #[cfg(feature = "no-tty")] term_backend: crossterm::event::NoTtyEvent,
-        #[cfg(feature = "no-tty")] sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+        #[cfg(feature = "no-tty")] stdout: crossterm::event::SenderWriter,
     ) -> Self {
-        #[cfg(feature = "no-tty")]
-        let stdout = crossterm::event::SenderWriter::new(sender);
-
         let history = Box::<FileBackedHistory>::default();
         let painter = Painter::new(
             #[cfg(not(feature = "no-tty"))]
