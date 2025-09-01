@@ -217,7 +217,7 @@ pub struct Reedline {
     term_backend: crossterm::event::NoTtyEvent,
 
     #[cfg(feature = "no-tty")]
-    stdout: SenderWriter,
+    stdout: crossterm::event::SenderWriter,
 
     #[cfg(feature = "external_printer")]
     external_printer: Option<ExternalPrinter<String>>,
@@ -267,7 +267,7 @@ impl Reedline {
         #[cfg(feature = "no-tty")] sender: tokio::sync::mpsc::Sender<Vec<u8>>,
     ) -> Self {
         #[cfg(feature = "no-tty")]
-        let stdout = SenderWriter(sender);
+        let stdout = SenderWriter::new(sender);
 
         let history = Box::<FileBackedHistory>::default();
         let painter = Painter::new(

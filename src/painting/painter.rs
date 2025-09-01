@@ -80,7 +80,7 @@ fn skip_buffer_lines_range(string: &str, skip: usize, offset: Option<usize>) -> 
 #[cfg(not(feature = "no-tty"))]
 pub type W = std::io::BufWriter<std::io::Stderr>;
 #[cfg(feature = "no-tty")]
-pub type W = std::io::BufWriter<crate::engine::SenderWriter>;
+pub type W = std::io::BufWriter<crossterm::event::SenderWriter>;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PainterSuspendedState {
