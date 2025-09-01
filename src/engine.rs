@@ -269,7 +269,7 @@ impl Reedline {
         #[cfg(feature = "no-tty")] sender: tokio::sync::mpsc::Sender<Vec<u8>>,
     ) -> Self {
         #[cfg(feature = "no-tty")]
-        let stdout = SenderWriter::new(sender);
+        let stdout = crossterm::event::SenderWriter::new(sender);
 
         let history = Box::<FileBackedHistory>::default();
         #[cfg(all(not(test), not(feature = "no-tty")))]
