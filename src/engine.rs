@@ -264,11 +264,8 @@ impl Reedline {
     #[must_use]
     pub fn create(
         #[cfg(feature = "no-tty")] term_backend: crossterm::event::NoTtyEvent,
-        #[cfg(feature = "no-tty")] sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+        #[cfg(feature = "no-tty")] stdout: crossterm::event::SenderWriter,
     ) -> Self {
-        #[cfg(feature = "no-tty")]
-        let stdout = crossterm::event::SenderWriter::new(sender);
-
         let history = Box::<FileBackedHistory>::default();
         let painter = Painter::new(
             #[cfg(not(feature = "no-tty"))]
@@ -2234,25 +2231,6 @@ impl Reedline {
         self.editor.reset_undo_stack();
 
         Ok(EventStatus::Exits(Signal::Success(buffer)))
-    }
-}
-
-#[derive(Clone)]
-#[cfg(feature = "no-tty")]
-pub(crate) struct SenderWriter(tokio::sync::mpsc::Sender<Vec<u8>>);
-
-#[cfg(feature = "no-tty")]
-impl std::io::Write for SenderWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .blocking_send(buf.to_vec())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        // mpsc is unbuffered; nothing to flush
-        Ok(())
     }
 }
 
