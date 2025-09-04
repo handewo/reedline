@@ -175,6 +175,8 @@ pub fn parse_selection_char(buffer: &str, marker: char) -> ParseResult<'_> {
 
 /// Finds index for the common string in a list of suggestions
 pub fn find_common_string(values: &[Suggestion]) -> Option<(&Suggestion, usize)> {
+    let mut values: Vec<&Suggestion> = values.iter().collect();
+    values.sort_by(|a, b| a.value.cmp(&b.value));
     let first_suggestion = values.first()?;
     let max_len = first_suggestion.value.len();
 
