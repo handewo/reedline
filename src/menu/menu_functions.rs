@@ -163,6 +163,8 @@ pub fn parse_selection_char(buffer: &str, marker: char) -> ParseResult {
 /// Finds index for the common string in a list of suggestions
 pub fn find_common_string(values: &[Suggestion]) -> (Option<&Suggestion>, Option<usize>) {
     let first = values.iter().next();
+    let mut values = Vec::from(values);
+    values.sort_by(|a, b| a.value.cmp(&b.value));
 
     let index = first.and_then(|first| {
         values.iter().skip(1).fold(None, |index, suggestion| {
