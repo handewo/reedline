@@ -494,6 +494,7 @@ impl Reedline {
         self
     }
 
+    /// Turn off echoing user input. This is useful when input password
     #[must_use]
     pub fn with_disable_echo(mut self, disable_echo: bool) -> Self {
         self.disable_echo = disable_echo;
