@@ -269,7 +269,7 @@ impl Reedline {
             buffer_editor: None,
             cursor_shapes: None,
             bracketed_paste: BracketedPasteGuard::default(),
-            kitty_protocol: KittyProtocolGuard::default(),
+            kitty_protocol: KittyProtocolGuard::new(),
             immediately_accept: false,
             disable_echo: false,
             #[cfg(feature = "no-tty")]
