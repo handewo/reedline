@@ -905,11 +905,12 @@ impl Reedline {
                 };
 
                 if needs_polling {
+                    #[cfg(not(feature = "no-tty"))]
                     if event::poll(self.poll_interval)? {
-                        #[cfg(not(feature = "no-tty"))]
                         events.push(crossterm::event::read()?);
-
-                        #[cfg(feature = "no-tty")]
+                    }
+                    #[cfg(feature = "no-tty")]
+                    if event::poll(&self.term_backend, self.poll_interval)? {
                         events.push(crossterm::event::read(&self.term_backend)?);
                     }
                 } else {
