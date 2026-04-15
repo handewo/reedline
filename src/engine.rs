@@ -211,8 +211,6 @@ pub struct Reedline {
     // Only used when external_printer or idle_callback is configured.
     poll_interval: Duration,
 
-    disable_echo: bool,
-
     #[cfg(feature = "no-tty")]
     term_backend: crossterm::event::NoTtyEvent,
 
@@ -320,7 +318,6 @@ impl Reedline {
             immediately_accept: false,
             break_signal: None,
             poll_interval: DEFAULT_POLL_INTERVAL,
-            disable_echo: false,
             #[cfg(feature = "no-tty")]
             term_backend,
             #[cfg(feature = "no-tty")]
@@ -473,13 +470,6 @@ impl Reedline {
             self.painter
                 .set_semantic_markers(Some(Osc133ClickEventsMarkers::boxed()));
         }
-        self
-    }
-
-    /// Turn off echoing user input. This is useful when input password
-    #[must_use]
-    pub fn with_disable_echo(mut self, disable_echo: bool) -> Self {
-        self.disable_echo = disable_echo;
         self
     }
 
@@ -1747,11 +1737,7 @@ impl Reedline {
 
         // Run the commands over the edit buffer
         for command in commands {
-            if self.disable_echo {
-                self.editor.run_edit_command_insert(command);
-            } else {
-                self.editor.run_edit_command(command);
-            }
+            self.editor.run_edit_command(command);
         }
     }
 
@@ -2007,7 +1993,6 @@ impl Reedline {
                 self.prompt_edit_mode(),
                 None,
                 self.use_ansi_coloring,
-                self.disable_echo,
                 &self.cursor_shapes,
             )?;
         }
@@ -2092,7 +2077,6 @@ impl Reedline {
             self.prompt_edit_mode(),
             menu,
             self.use_ansi_coloring,
-            self.disable_echo,
             &self.cursor_shapes,
         )?;
 

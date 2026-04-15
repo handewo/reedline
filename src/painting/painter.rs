@@ -412,7 +412,6 @@ impl Painter {
         prompt_mode: PromptEditMode,
         menu: Option<&ReedlineMenu>,
         use_ansi_coloring: bool,
-        disable_echo: bool,
         cursor_config: &Option<CursorConfig>,
     ) -> Result<()> {
         // Reset any ANSI styling that may have been left by external commands
@@ -482,14 +481,7 @@ impl Painter {
         if self.large_buffer {
             self.print_large_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?;
         } else {
-            self.print_small_buffer(
-                prompt,
-                lines,
-                menu,
-                use_ansi_coloring,
-                &layout,
-                disable_echo,
-            )?;
+            self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?;
         }
 
         self.last_layout = Some(layout);
@@ -760,7 +752,6 @@ impl Painter {
         menu: Option<&ReedlineMenu>,
         use_ansi_coloring: bool,
         layout: &PromptLayout,
-        disable_echo: bool,
     ) -> Result<()> {
         // Emit prompt start marker (OSC 133;A;k=i for primary prompt)
         if let Some(markers) = &self.semantic_markers {
@@ -803,12 +794,10 @@ impl Painter {
                 .queue(ResetColor)?;
         }
 
-        if !disable_echo {
-            self.stdout
-                .queue(Print(&lines.before_cursor))?
-                .queue(SavePosition)?
-                .queue(Print(&lines.after_cursor))?;
-        }
+        self.stdout
+            .queue(Print(&lines.before_cursor))?
+            .queue(SavePosition)?
+            .queue(Print(&lines.after_cursor))?;
 
         if let Some(menu) = menu {
             self.print_menu(menu, use_ansi_coloring, layout)?;
@@ -1442,7 +1431,7 @@ mod tests {
         let layout = painter.compute_layout(&lines, None);
 
         painter
-            .print_small_buffer(&prompt, &lines, None, false, &layout, false)
+            .print_small_buffer(&prompt, &lines, None, false, &layout)
             .expect("print_small_buffer failed");
 
         let recorded = calls.lock().expect("marker lock poisoned").clone();
