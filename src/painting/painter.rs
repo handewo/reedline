@@ -90,7 +90,7 @@ pub enum W {
     Terminal(std::io::BufWriter<std::io::Stderr>),
     #[cfg(feature = "no-tty")]
     #[cfg_attr(test, allow(dead_code))]
-    Terminal(std::io::BufWriter<crate::engine::SenderWriter>),
+    Terminal(std::io::BufWriter<crossterm::event::SenderWriter>),
     /// Discards all output, used in tests.
     #[cfg(test)]
     Sink(std::io::Sink),
@@ -111,7 +111,7 @@ impl W {
 
     #[cfg(feature = "no-tty")]
     #[cfg_attr(test, allow(dead_code))]
-    pub(crate) fn terminal(sender: crate::engine::SenderWriter) -> Self {
+    pub(crate) fn terminal(sender: crossterm::event::SenderWriter) -> Self {
         W::Terminal(std::io::BufWriter::new(sender))
     }
 
@@ -588,6 +588,21 @@ impl Painter {
         // the query confirms no drift, so later paints can skip it.
         let should_reset_anchor = match self.prompt_start_row {
             PromptStartRow::Verified(_) => false,
+            #[cfg(feature = "no-tty")]
+            PromptStartRow::Stale(row) => match cursor::position(&self.term_backend) {
+                // The `+1` handles the case where the previous output
+                // ended without a newline, leaving the cursor on the
+                // same row as the next prompt.
+                Ok(position) => {
+                    let drifted = position.1 + 1 < row;
+                    if !drifted {
+                        self.prompt_start_row.mark_verified(row);
+                    }
+                    drifted
+                }
+                Err(_) => false,
+            },
+            #[cfg(not(feature = "no-tty"))]
             PromptStartRow::Stale(row) => match cursor::position() {
                 // The `+1` handles the case where the previous output
                 // ended without a newline, leaving the cursor on the
@@ -1108,7 +1123,7 @@ impl Painter {
             }
             #[cfg(feature = "no-tty")]
             if let Ok(position) = cursor::position(&self.term_backend) {
-                self.prompt_start_row = position.1;
+                self.prompt_start_row = PromptStartRow::Stale(position.1);
                 self.just_resized = true;
             }
         }

@@ -270,7 +270,7 @@ impl Reedline {
         #[cfg(all(not(test), not(feature = "no-tty")))]
         let painter = Painter::new(W::terminal());
         #[cfg(all(not(test), feature = "no-tty"))]
-        let painter = Painter::new(W::terminal());
+        let painter = Painter::new(W::terminal(stdout.clone()), term_backend.clone());
         #[cfg(test)]
         let painter = Painter::new(W::sink());
         let buffer_highlighter = Box::<ExampleHighlighter>::default();
