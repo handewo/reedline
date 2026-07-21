@@ -21,9 +21,11 @@ chrono = { version = "0.4.19", default-features = false, features = [
     "serde",
 ] }
 crossbeam = { version = "0.8.2", optional = true }
-crossterm = { git = "https://github.com/handewo/crossterm.git", features = [
+crossterm = { git = "https://github.com/handewo/crossterm.git", rev = "bd0dc9b", features = [
     "serde",
 ] }
+bytes = { version = "1", optional = true }
+maybe-async-cfg = "0.2.5"
 fd-lock = "4.0.2"
 itertools = "0.13.0"
 keybindings = { version = "0.0.2", optional = true }
@@ -39,16 +41,18 @@ unicode-segmentation = "1.9.0"
 unicode-width = "0.2"
 
 [dev-dependencies]
+bytes = "1"
 gethostname = "0.4.0"
 pretty_assertions = "1.4.0"
 rstest = { version = "0.23.0", default-features = false }
 serde_json = "1.0"
 tempfile = "3.3.0"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 
 
 [features]
 bashisms = []
-no-tty = ["crossterm/no-tty"]
+no-tty = ["crossterm/no-tty", "dep:bytes"]
 external_printer = ["crossbeam"]
 idle_callback = []
 helix = ["keybindings"]

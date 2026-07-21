@@ -10,6 +10,7 @@ pub(crate) struct BracketedPasteGuard {
 }
 
 impl BracketedPasteGuard {
+    #[cfg(not(feature = "no-tty"))]
     pub fn set(&mut self, enable: bool) {
         self.enabled = enable;
     }

@@ -41,10 +41,9 @@ use {
         ValidationResult, Validator,
     },
     crossterm::{
-        cursor::{SetCursorStyle, Show},
         event,
         event::{Event, KeyCode, KeyEvent, KeyModifiers},
-        terminal, QueueableCommand,
+        terminal,
     },
     std::{
         fs::File,
@@ -57,6 +56,23 @@ use {
         time::SystemTime,
     },
 };
+
+// `handle_editor_event` and `handle_history_search_event` recurse. Under
+// `no-tty` they are `async fn`, and a recursive `async fn` needs its recursive
+// calls boxed (`Box::pin(..).await`). In the sync build the same call is direct.
+// `recurse!` hides that difference so the shared function bodies read the same.
+#[cfg(feature = "no-tty")]
+macro_rules! recurse {
+    ($e:expr) => {
+        Box::pin($e).await
+    };
+}
+#[cfg(not(feature = "no-tty"))]
+macro_rules! recurse {
+    ($e:expr) => {
+        $e
+    };
+}
 
 // The POLL_WAIT is used to specify for how long the POLL should wait for
 // events, to accelerate the handling of paste or compound resize events. Having
@@ -216,9 +232,6 @@ pub struct Reedline {
     #[cfg(feature = "no-tty")]
     term_backend: crossterm::event::NoTtyEvent,
 
-    #[cfg(feature = "no-tty")]
-    stdout: crossterm::event::SenderWriter,
-
     #[cfg(feature = "external_printer")]
     external_printer: Option<ExternalPrinter<String>>,
 
@@ -237,19 +250,20 @@ impl Drop for Reedline {
     fn drop(&mut self) {
         #[cfg(not(feature = "no-tty"))]
         if self.cursor_shapes.is_some() {
+            use crossterm::{
+                cursor::{SetCursorStyle, Show},
+                QueueableCommand,
+            };
             let _ignore = terminal::enable_raw_mode();
             let mut stdout = std::io::stdout();
             let _ignore = stdout.queue(SetCursorStyle::DefaultUserShape);
             let _ignore = stdout.queue(Show);
             let _ignore = stdout.flush();
         }
-        #[cfg(feature = "no-tty")]
-        if self.cursor_shapes.is_some() {
-            let _ignore = terminal::enable_raw_mode();
-            let _ignore = self.stdout.queue(SetCursorStyle::DefaultUserShape);
-            let _ignore = self.stdout.queue(Show);
-            let _ignore = self.stdout.flush();
-        }
+        // Under `no-tty` the cursor-shape restore cannot happen here:
+        // `SenderWriter` is async-only and `Drop` cannot `.await`. The restore
+        // is performed instead at the end of the async `read_line` (see
+        // `restore_cursor_shape`), which runs on the normal exit path.
 
         // Ensures that the terminal is in a good state if we panic semigracefully
         // Calling `disable_raw_mode()` twice is fine with Linux
@@ -270,7 +284,7 @@ impl Reedline {
         #[cfg(all(not(test), not(feature = "no-tty")))]
         let painter = Painter::new(W::terminal());
         #[cfg(all(not(test), feature = "no-tty"))]
-        let painter = Painter::new(W::terminal(stdout.clone()), term_backend.clone());
+        let painter = Painter::new(W::terminal(stdout), term_backend.clone());
         #[cfg(test)]
         let painter = Painter::new(W::sink());
         let buffer_highlighter = Box::<ExampleHighlighter>::default();
@@ -321,8 +335,6 @@ impl Reedline {
             poll_interval: DEFAULT_POLL_INTERVAL,
             #[cfg(feature = "no-tty")]
             term_backend,
-            #[cfg(feature = "no-tty")]
-            stdout,
             #[cfg(feature = "external_printer")]
             external_printer: None,
             #[cfg(feature = "idle_callback")]
@@ -715,20 +727,28 @@ impl Reedline {
     }
 
     /// Output the complete [`History`] chronologically with numbering to the terminal
-    pub fn print_history(&mut self) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    pub async fn print_history(&mut self) -> Result<()> {
         let history: Vec<_> = self
             .history
             .search(SearchQuery::everything(SearchDirection::Forward, None))
             .expect("todo: error handling");
 
         for (i, entry) in history.iter().enumerate() {
-            self.print_line(&format!("{}\t{}", i, entry.command_line))?;
+            self.print_line(&format!("{}\t{}", i, entry.command_line)).await?;
         }
         Ok(())
     }
 
     /// Output the complete [`History`] for this session, chronologically with numbering to the terminal
-    pub fn print_history_session(&mut self) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    pub async fn print_history_session(&mut self) -> Result<()> {
         let history: Vec<_> = self
             .history
             .search(SearchQuery::everything(
@@ -738,7 +758,7 @@ impl Reedline {
             .expect("todo: error handling");
 
         for (i, entry) in history.iter().enumerate() {
-            self.print_line(&format!("{}\t{}", i, entry.command_line))?;
+            self.print_line(&format!("{}\t{}", i, entry.command_line)).await?;
         }
         Ok(())
     }
@@ -806,15 +826,28 @@ impl Reedline {
     ///
     /// Returns a [`std::io::Result`] in which the `Err` type is [`std::io::Result`]
     /// and the `Ok` variant wraps a [`Signal`] which handles user inputs.
-    pub fn read_line(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    pub async fn read_line(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
         terminal::enable_raw_mode()?;
         self.bracketed_paste.enter();
         self.kitty_protocol.enter();
 
-        let result = self.read_line_helper(prompt);
+        let result = self.read_line_helper(prompt).await;
 
         self.bracketed_paste.exit();
         self.kitty_protocol.exit();
+
+        // Under `no-tty` the cursor-shape restore that a TTY build does in
+        // `Drop` cannot run there (the channel writer is async). Do it here, on
+        // the normal exit path, before releasing raw mode.
+        #[cfg(feature = "no-tty")]
+        if self.cursor_shapes.is_some() {
+            self.painter.restore_cursor_shape().await?;
+        }
+
         terminal::disable_raw_mode()?;
         result
     }
@@ -830,30 +863,46 @@ impl Reedline {
     }
 
     /// Writes `msg` to the terminal with a following carriage return and newline
-    fn print_line(&mut self, msg: &str) -> Result<()> {
-        self.painter.paint_line(msg)
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn print_line(&mut self, msg: &str) -> Result<()> {
+        self.painter.paint_line(msg).await
     }
 
     /// Clear the screen by printing enough whitespace to start the prompt or
     /// other output back at the first line of the terminal.
-    pub fn clear_screen(&mut self) -> Result<()> {
-        self.painter.clear_screen()?;
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    pub async fn clear_screen(&mut self) -> Result<()> {
+        self.painter.clear_screen().await?;
 
         Ok(())
     }
 
     /// Clear the screen and the scrollback buffer of the terminal
-    pub fn clear_scrollback(&mut self) -> Result<()> {
-        self.painter.clear_scrollback()?;
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    pub async fn clear_scrollback(&mut self) -> Result<()> {
+        self.painter.clear_scrollback().await?;
 
         Ok(())
     }
 
     /// Helper implementing the logic for [`Reedline::read_line()`] to be wrapped
     /// in a `raw_mode` context.
-    fn read_line_helper(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn read_line_helper(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
         self.painter
-            .initialize_prompt_position(self.suspended_state.as_ref())?;
+            .initialize_prompt_position(self.suspended_state.as_ref()).await?;
         if self.suspended_state.is_some() {
             // Last editor was suspended (ExecuteHostCommand or ExternalBreak),
             // we are resuming operation now.
@@ -861,7 +910,7 @@ impl Reedline {
         }
         self.hide_hints = false;
 
-        self.repaint(prompt)?;
+        self.repaint(prompt).await?;
 
         loop {
             // Call idle callback if set (for processing external events like GUI updates)
@@ -896,7 +945,7 @@ impl Reedline {
                         self.editor.line_buffer(),
                         prompt,
                     )?;
-                    self.repaint(prompt)?;
+                    self.repaint(prompt).await?;
                 }
             }
 
@@ -914,7 +963,7 @@ impl Reedline {
                         self.completer.as_mut(),
                         self.history.as_ref(),
                     );
-                    self.repaint(prompt)?;
+                    self.repaint(prompt).await?;
                 }
             }
 
@@ -959,8 +1008,8 @@ impl Reedline {
                         events.push(crossterm::event::read()?);
                     }
                     #[cfg(feature = "no-tty")]
-                    if event::poll(&self.term_backend, self.poll_interval)? {
-                        events.push(crossterm::event::read(&self.term_backend)?);
+                    if event::poll(&self.term_backend, self.poll_interval).await? {
+                        events.push(crossterm::event::read(&self.term_backend).await?);
                     }
                 } else {
                     // Block until we receive an event
@@ -968,7 +1017,7 @@ impl Reedline {
                     events.push(crossterm::event::read()?);
 
                     #[cfg(feature = "no-tty")]
-                    events.push(crossterm::event::read(&self.term_backend)?);
+                    events.push(crossterm::event::read(&self.term_backend).await?);
                 }
 
                 // Receive all events in the queue without blocking. Will stop when
@@ -980,9 +1029,9 @@ impl Reedline {
 
                 #[cfg(feature = "no-tty")]
                 while !completed(&events)
-                    && event::poll(&self.term_backend, Duration::from_millis(0))?
+                    && event::poll(&self.term_backend, Duration::from_millis(0)).await?
                 {
-                    events.push(crossterm::event::read(&self.term_backend)?);
+                    events.push(crossterm::event::read(&self.term_backend).await?);
                 }
 
                 // If we believe there's text pasting or resizing going on, batch
@@ -996,8 +1045,8 @@ impl Reedline {
                     }
 
                     #[cfg(feature = "no-tty")]
-                    while !completed(&events) && event::poll(&self.term_backend, POLL_WAIT)? {
-                        events.push(crossterm::event::read(&self.term_backend)?);
+                    while !completed(&events) && event::poll(&self.term_backend, POLL_WAIT).await? {
+                        events.push(crossterm::event::read(&self.term_backend).await?);
                     }
                 }
             }
@@ -1006,13 +1055,17 @@ impl Reedline {
             // `events` stays empty, but `process_input_batch` still pushes the
             // synthetic `Submit` and returns the buffer. Gating this call behind
             // `!immediately_accept` would spin the loop forever.
-            if let ControlFlow::Break(signal) = self.process_input_batch(prompt, events)? {
+            if let ControlFlow::Break(signal) = self.process_input_batch(prompt, events).await? {
                 return Ok(signal);
             }
         }
     }
 
-    fn process_input_batch(
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn process_input_batch(
         &mut self,
         prompt: &dyn Prompt,
         events: Vec<Event>,
@@ -1058,14 +1111,14 @@ impl Reedline {
         // Handle reedline events.
         let mut need_repaint = false;
         for event in reedline_events {
-            match self.handle_event(prompt, event)? {
+            match self.handle_event(prompt, event).await? {
                 EventStatus::Exits(signal) => {
                     // Check if we are merely suspended (to process an ExecuteHostCommand event)
                     // or if we're about to quit the editor.
                     if self.suspended_state.is_none() {
                         // We are about to quit the editor, move the cursor below the input
                         // area, for external commands or new read_line call
-                        self.painter.move_cursor_to_end()?;
+                        self.painter.move_cursor_to_end().await?;
                     }
                     return Ok(ControlFlow::Break(signal));
                 }
@@ -1092,24 +1145,32 @@ impl Reedline {
             // the last grapheme for a frame.
             let mode = self.edit_mode.edit_mode();
             self.editor.set_edit_mode(mode);
-            self.repaint(prompt)?;
+            self.repaint(prompt).await?;
         }
         Ok(ControlFlow::Continue(()))
     }
 
-    fn handle_event(&mut self, prompt: &dyn Prompt, event: ReedlineEvent) -> Result<EventStatus> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn handle_event(&mut self, prompt: &dyn Prompt, event: ReedlineEvent) -> Result<EventStatus> {
         if self.input_mode == InputMode::HistorySearch {
-            self.handle_history_search_event(event)
+            self.handle_history_search_event(event).await
         } else {
-            self.handle_editor_event(prompt, event)
+            self.handle_editor_event(prompt, event).await
         }
     }
 
-    fn handle_history_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn handle_history_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
         match event {
             ReedlineEvent::UntilFound(events) => {
                 for event in events {
-                    match self.handle_history_search_event(event)? {
+                    match recurse!(self.handle_history_search_event(event))? {
                         EventStatus::Inapplicable => {
                             // Try again with the next event handler
                         }
@@ -1136,11 +1197,11 @@ impl Reedline {
                 Ok(EventStatus::Exits(Signal::CtrlC))
             }
             ReedlineEvent::ClearScreen => {
-                self.painter.clear_screen()?;
+                self.painter.clear_screen().await?;
                 Ok(EventStatus::Handled)
             }
             ReedlineEvent::ClearScrollback => {
-                self.painter.clear_scrollback()?;
+                self.painter.clear_scrollback().await?;
                 Ok(EventStatus::Handled)
             }
             ReedlineEvent::Enter
@@ -1176,7 +1237,7 @@ impl Reedline {
             }
             ReedlineEvent::Resize(width, height) => {
                 self.last_render_snapshot = None;
-                self.painter.handle_resize(width, height);
+                self.painter.handle_resize(width, height).await;
                 Ok(EventStatus::Handled)
             }
             ReedlineEvent::Repaint => {
@@ -1227,7 +1288,11 @@ impl Reedline {
         }
     }
 
-    fn handle_editor_event(
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn handle_editor_event(
         &mut self,
         prompt: &dyn Prompt,
         event: ReedlineEvent,
@@ -1246,7 +1311,7 @@ impl Reedline {
                             );
 
                             if menu.get_values().len() == 1 {
-                                return self.handle_editor_event(prompt, ReedlineEvent::Enter);
+                                return recurse!(self.handle_editor_event(prompt, ReedlineEvent::Enter));
                             }
                         }
 
@@ -1269,7 +1334,7 @@ impl Reedline {
             ReedlineEvent::MenuNext => {
                 if let Some(menu) = self.menus.iter_mut().find(|menu| menu.is_active()) {
                     if menu.get_values().len() == 1 && menu.can_quick_complete() {
-                        self.handle_editor_event(prompt, ReedlineEvent::Enter)
+                        recurse!(self.handle_editor_event(prompt, ReedlineEvent::Enter))
                     } else {
                         if self.partial_completions {
                             menu.can_partially_complete(
@@ -1365,12 +1430,12 @@ impl Reedline {
             }
             ReedlineEvent::ClearScreen => {
                 self.deactivate_menus();
-                self.painter.clear_screen()?;
+                self.painter.clear_screen().await?;
                 Ok(EventStatus::Handled)
             }
             ReedlineEvent::ClearScrollback => {
                 self.deactivate_menus();
-                self.painter.clear_scrollback()?;
+                self.painter.clear_scrollback().await?;
                 Ok(EventStatus::Handled)
             }
             ReedlineEvent::Enter | ReedlineEvent::Submit | ReedlineEvent::SubmitOrNewline
@@ -1389,15 +1454,15 @@ impl Reedline {
             ReedlineEvent::Enter => {
                 #[cfg(feature = "bashisms")]
                 if let Some(event) = self.parse_bang_command() {
-                    return self.handle_editor_event(prompt, event);
+                    return recurse!(self.handle_editor_event(prompt, event));
                 }
                 if let Some(event) = self.try_expand_abbreviation_at_cursor(true) {
-                    self.handle_editor_event(prompt, event)?;
+                    recurse!(self.handle_editor_event(prompt, event))?;
                 }
 
                 let buffer = self.editor.get_buffer().to_string();
                 match self.validator.as_mut().map(|v| v.validate(&buffer)) {
-                    None | Some(ValidationResult::Complete) => Ok(self.submit_buffer(prompt)?),
+                    None | Some(ValidationResult::Complete) => Ok(self.submit_buffer(prompt).await?),
                     Some(ValidationResult::Incomplete) => {
                         self.run_edit_commands(&[EditCommand::InsertNewline]);
 
@@ -1408,21 +1473,21 @@ impl Reedline {
             ReedlineEvent::Submit => {
                 #[cfg(feature = "bashisms")]
                 if let Some(event) = self.parse_bang_command() {
-                    return self.handle_editor_event(prompt, event);
+                    return recurse!(self.handle_editor_event(prompt, event));
                 }
                 if let Some(event) = self.try_expand_abbreviation_at_cursor(true) {
-                    self.handle_editor_event(prompt, event)?;
+                    recurse!(self.handle_editor_event(prompt, event))?;
                 }
 
-                Ok(self.submit_buffer(prompt)?)
+                Ok(self.submit_buffer(prompt).await?)
             }
             ReedlineEvent::SubmitOrNewline => {
                 #[cfg(feature = "bashisms")]
                 if let Some(event) = self.parse_bang_command() {
-                    return self.handle_editor_event(prompt, event);
+                    return recurse!(self.handle_editor_event(prompt, event));
                 }
                 if let Some(event) = self.try_expand_abbreviation_at_cursor(true) {
-                    self.handle_editor_event(prompt, event)?;
+                    recurse!(self.handle_editor_event(prompt, event))?;
                 }
 
                 let cursor_position_in_buffer = self.editor.insertion_point();
@@ -1432,7 +1497,7 @@ impl Reedline {
                     return Ok(EventStatus::Handled);
                 }
                 match self.validator.as_mut().map(|v| v.validate(&buffer)) {
-                    None | Some(ValidationResult::Complete) => Ok(self.submit_buffer(prompt)?),
+                    None | Some(ValidationResult::Complete) => Ok(self.submit_buffer(prompt).await?),
                     Some(ValidationResult::Incomplete) => {
                         self.run_edit_commands(&[EditCommand::InsertNewline]);
 
@@ -1450,7 +1515,7 @@ impl Reedline {
                 // Check if a space was just inserted and try to expand abbreviations
                 if let Some(EditCommand::InsertChar(' ')) = commands.first() {
                     if let Some(event) = self.try_expand_abbreviation_at_cursor(false) {
-                        return self.handle_editor_event(prompt, event);
+                        return recurse!(self.handle_editor_event(prompt, event));
                     }
                 }
                 if let Some(menu) = self.menus.iter_mut().find(|men| men.is_active()) {
@@ -1470,8 +1535,8 @@ impl Reedline {
                                 );
                                 if let Some(&EditCommand::Complete) = commands.first() {
                                     if menu.get_values().len() == 1 {
-                                        return self
-                                            .handle_editor_event(prompt, ReedlineEvent::Enter);
+                                        return recurse!(self
+                                            .handle_editor_event(prompt, ReedlineEvent::Enter));
                                     } else if self.partial_completions
                                         && menu.can_partially_complete(
                                             self.quick_completions,
@@ -1494,10 +1559,10 @@ impl Reedline {
                 }
                 Ok(EventStatus::Handled)
             }
-            ReedlineEvent::OpenEditor => self.open_editor().map(|_| EventStatus::Handled),
+            ReedlineEvent::OpenEditor => self.open_editor().await.map(|_| EventStatus::Handled),
             ReedlineEvent::Resize(width, height) => {
                 self.last_render_snapshot = None;
-                self.painter.handle_resize(width, height);
+                self.painter.handle_resize(width, height).await;
                 Ok(EventStatus::Handled)
             }
             ReedlineEvent::Repaint => {
@@ -1547,7 +1612,7 @@ impl Reedline {
             ReedlineEvent::Multiple(events) => {
                 let mut latest_signal = EventStatus::Inapplicable;
                 for event in events {
-                    match self.handle_editor_event(prompt, event)? {
+                    match recurse!(self.handle_editor_event(prompt, event))? {
                         EventStatus::Handled => {
                             latest_signal = EventStatus::Handled;
                         }
@@ -1567,7 +1632,7 @@ impl Reedline {
             }
             ReedlineEvent::UntilFound(events) => {
                 for event in events {
-                    match self.handle_editor_event(prompt, event)? {
+                    match recurse!(self.handle_editor_event(prompt, event))? {
                         EventStatus::Inapplicable => {
                             // Try again with the next event handler
                         }
@@ -1877,12 +1942,16 @@ impl Reedline {
     }
 
     /// Repaint of either the buffer or the parts for reverse history search
-    fn repaint(&mut self, prompt: &dyn Prompt) -> io::Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn repaint(&mut self, prompt: &dyn Prompt) -> io::Result<()> {
         // Repainting
         if self.input_mode == InputMode::HistorySearch {
-            self.history_search_paint(prompt)
+            self.history_search_paint(prompt).await
         } else {
-            self.buffer_paint(prompt)
+            self.buffer_paint(prompt).await
         }
     }
 
@@ -2100,7 +2169,11 @@ impl Reedline {
         }
     }
 
-    fn open_editor(&mut self) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn open_editor(&mut self) -> Result<()> {
         match &mut self.buffer_editor {
             Some(BufferEditor {
                 ref mut command,
@@ -2134,7 +2207,7 @@ impl Reedline {
                 // losing the user's edited buffer below is not.
                 let _ = self
                     .painter
-                    .initialize_prompt_position(Some(&suspended_state));
+                    .initialize_prompt_position(Some(&suspended_state)).await;
 
                 let res = std::fs::read_to_string(temp_file)?;
                 let res = res.trim_end().to_string();
@@ -2151,7 +2224,11 @@ impl Reedline {
     ///
     /// Overwrites the prompt indicator and highlights the search string
     /// separately from the result buffer.
-    fn history_search_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn history_search_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
         let navigation = self.history_cursor.get_navigation();
 
         if let HistoryNavigationQuery::SubstringSearch(substring) = navigation {
@@ -2191,7 +2268,7 @@ impl Reedline {
                 None,
                 self.use_ansi_coloring,
                 &self.cursor_shapes,
-            )?;
+            ).await?;
         }
 
         Ok(())
@@ -2200,7 +2277,11 @@ impl Reedline {
     /// Triggers a full repaint including the prompt parts
     ///
     /// Includes the highlighting and hinting calls.
-    fn buffer_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn buffer_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
         let cursor_position_in_buffer = self.editor.insertion_point();
         let buffer_to_paint = self.editor.get_buffer();
 
@@ -2275,7 +2356,7 @@ impl Reedline {
             menu,
             self.use_ansi_coloring,
             &self.cursor_shapes,
-        )?;
+        ).await?;
 
         if self.mouse_click_mode.is_enabled() {
             if let Some(layout) = &self.painter.last_layout {
@@ -2380,15 +2461,19 @@ impl Reedline {
         Ok(messages)
     }
 
-    fn submit_buffer(&mut self, prompt: &dyn Prompt) -> io::Result<EventStatus> {
+    #[maybe_async_cfg::maybe(
+        sync(cfg(not(feature = "no-tty")), keep_self),
+        async(cfg(feature = "no-tty"), keep_self),
+    )]
+    async fn submit_buffer(&mut self, prompt: &dyn Prompt) -> io::Result<EventStatus> {
         let buffer = self.editor.get_buffer().to_string();
         self.hide_hints = true;
         // Additional repaint to show the content without hints etc.
         if let Some(transient_prompt) = self.transient_prompt.take() {
-            self.repaint(transient_prompt.as_ref())?;
+            self.repaint(transient_prompt.as_ref()).await?;
             self.transient_prompt = Some(transient_prompt);
         } else {
-            self.repaint(prompt)?;
+            self.repaint(prompt).await?;
         }
         if !buffer.is_empty() {
             let mut entry = HistoryItem::from_command_line(&buffer);
