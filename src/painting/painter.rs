@@ -191,7 +191,7 @@ impl W {
     /// [`SenderWriter`](crossterm::event::SenderWriter) via `write_all`.
     #[maybe_async_cfg::maybe(
         sync(cfg(not(feature = "no-tty")), keep_self),
-        async(cfg(feature = "no-tty"), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
     )]
     pub(crate) async fn flush_out(&mut self) -> Result<()> {
         #[cfg(not(feature = "no-tty"))]
@@ -532,7 +532,7 @@ impl Painter {
     /// [`Painter::handle_resize()`] instead
     #[maybe_async_cfg::maybe(
         sync(cfg(not(feature = "no-tty")), keep_self),
-        async(cfg(feature = "no-tty"), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
     )]
     pub(crate) async fn initialize_prompt_position(
         &mut self,
@@ -600,7 +600,7 @@ impl Painter {
     /// the screen.
     #[maybe_async_cfg::maybe(
         sync(cfg(not(feature = "no-tty")), keep_self),
-        async(cfg(feature = "no-tty"), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
     )]
     pub(crate) async fn repaint_buffer(
         &mut self,
@@ -1166,7 +1166,7 @@ impl Painter {
     /// Updates prompt origin and offset to handle a screen resize event
     #[maybe_async_cfg::maybe(
         sync(cfg(not(feature = "no-tty")), keep_self),
-        async(cfg(feature = "no-tty"), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
     )]
     pub(crate) async fn handle_resize(&mut self, width: u16, height: u16) {
         self.terminal_size = (width, height);
@@ -1202,7 +1202,7 @@ impl Painter {
     /// terminal independently of the painter.
     #[maybe_async_cfg::maybe(
         sync(cfg(not(feature = "no-tty")), keep_self),
-        async(cfg(feature = "no-tty"), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
     )]
     pub(crate) async fn paint_line(&mut self, line: &str) -> Result<()> {
         // Invalidate up front: a partial write below can still leave
@@ -1217,7 +1217,7 @@ impl Painter {
     /// Also works in raw mode
     #[maybe_async_cfg::maybe(
         sync(cfg(not(feature = "no-tty")), keep_self),
-        async(cfg(feature = "no-tty"), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
     )]
     pub(crate) async fn print_crlf(&mut self) -> Result<()> {
         self.stdout.queue(Print("\r\n"))?;
@@ -1229,7 +1229,7 @@ impl Painter {
     /// other output back at the first line of the terminal.
     #[maybe_async_cfg::maybe(
         sync(cfg(not(feature = "no-tty")), keep_self),
-        async(cfg(feature = "no-tty"), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
     )]
     pub(crate) async fn clear_screen(&mut self) -> Result<()> {
         self.stdout
@@ -1241,7 +1241,7 @@ impl Painter {
 
     #[maybe_async_cfg::maybe(
         sync(cfg(not(feature = "no-tty")), keep_self),
-        async(cfg(feature = "no-tty"), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
     )]
     pub(crate) async fn clear_scrollback(&mut self) -> Result<()> {
         self.stdout
@@ -1258,18 +1258,33 @@ impl Painter {
     /// channel-backed writer is async-only, so the engine calls this at the end
     /// of the async `read_line` instead.
     #[cfg(feature = "no-tty")]
-    pub(crate) async fn restore_cursor_shape(&mut self) -> Result<()> {
+    pub(crate) fn restore_cursor_shape(&mut self) -> Result<()> {
         use crossterm::cursor::{SetCursorStyle, Show};
         self.stdout
             .queue(SetCursorStyle::DefaultUserShape)?
             .queue(Show)?;
-        self.stdout.flush_out().await
+
+        let W::Terminal {
+            sender,
+            ref mut buf,
+        } = &mut self.stdout;
+
+        let sender = sender.clone();
+        // let mut buf: Vec<_> = buf.drain(..).collect();
+        let mut buf: Vec<_> = std::mem::take(buf);
+        tokio::spawn(async move {
+            if !buf.is_empty() {
+                let _ = sender.write_all(&buf).await;
+                buf.clear();
+            }
+        });
+        Ok(())
     }
 
     // The prompt is moved to the end of the buffer after the event was handled
     #[maybe_async_cfg::maybe(
         sync(cfg(not(feature = "no-tty")), keep_self),
-        async(cfg(feature = "no-tty"), keep_self),
+        async(cfg(feature = "no-tty"), keep_self)
     )]
     pub(crate) async fn move_cursor_to_end(&mut self) -> Result<()> {
         if let Some(after_cursor) = &self.after_cursor_lines {

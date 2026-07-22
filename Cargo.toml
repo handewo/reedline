@@ -39,6 +39,7 @@ thiserror = "2.0.12"
 unicase = "2.8.0"
 unicode-segmentation = "1.9.0"
 unicode-width = "0.2"
+tokio = { version = "1", optional = true }
 
 [dev-dependencies]
 bytes = "1"
@@ -55,7 +56,7 @@ anyhow = "1"
 
 [features]
 bashisms = []
-no-tty = ["crossterm/no-tty", "dep:bytes"]
+no-tty = ["crossterm/no-tty", "dep:bytes", "dep:tokio"]
 external_printer = ["crossbeam"]
 idle_callback = []
 helix = ["keybindings"]

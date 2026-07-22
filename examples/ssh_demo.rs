@@ -2,10 +2,12 @@ use bytes::Bytes;
 
 use crossterm::terminal::WindowSize;
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, DefaultCompleter, DefaultPrompt, EditCommand, Emacs,
-    KeyCode, KeyModifiers, Keybindings, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+    default_emacs_keybindings, ColumnarMenu, CursorConfig, DefaultCompleter, DefaultPrompt,
+    EditCommand, Emacs, KeyCode, KeyModifiers, Keybindings, MenuBuilder, Reedline, ReedlineEvent,
+    ReedlineMenu, Signal,
 };
 
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{NoTtyEvent, SenderWriter};
 use rand::rng;
 use russh::keys::ssh_key::PublicKey;
@@ -264,8 +266,12 @@ async fn run_shell(
 
     let edit_mode = Box::new(Emacs::new(keybindings));
 
+    let mut cursor = CursorConfig::default();
+    cursor.emacs = Some(SetCursorStyle::SteadyUnderScore);
+
     let mut line_editor = Reedline::create(event, writer.clone())
         .with_completer(completer)
+        .with_cursor_config(cursor)
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
         .with_edit_mode(edit_mode);
 
@@ -280,11 +286,12 @@ async fn run_shell(
                     .await?;
             }
             Signal::CtrlD | Signal::CtrlC => {
-                writer.write_all(b"\nAborted!").await?;
-                tx_status.send(1).await?;
-                break Ok(());
+                writer.write_all(b"\nAborted!\r\n").await?;
+                break;
             }
             _ => {}
         }
     }
+    tx_status.send(1).await?;
+    Ok(())
 }
