@@ -159,7 +159,7 @@ impl Handler for SshHandler {
         let app_recv_for_forward = self.recv.take().unwrap();
         let writer = SenderWriter::new(tx.clone());
         tokio::spawn(async move {
-            run_shell(pty, tx_status, writer).await;
+            let _ = run_shell(pty, tx_status, writer).await;
         });
         let mut r = app_recv_for_forward;
         tokio::spawn(async move {
@@ -280,9 +280,7 @@ async fn run_shell(
                     .await?;
             }
             Signal::CtrlD | Signal::CtrlC => {
-                writer
-                    .write_all(&format!("\nAborted!").into_bytes())
-                    .await?;
+                writer.write_all(b"\nAborted!").await?;
                 tx_status.send(1).await?;
                 break Ok(());
             }

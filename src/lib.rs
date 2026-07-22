@@ -228,6 +228,27 @@
 #![warn(rustdoc::missing_crate_level_docs)]
 #![warn(missing_docs)]
 // #![deny(warnings)]
+
+/// Thread-safety marker required of reedline's extension traits.
+///
+/// Under the `no-tty` feature `read_line` is `async` and may be driven on a
+/// multi-threaded runtime (e.g. `tokio::spawn`), which requires its future to
+/// be `Send`. That in turn requires the trait objects `Reedline` holds
+/// (`Prompt`, `Completer`, `Menu`, ...) to be `Send + Sync`, so this marker
+/// adds those bounds. In the default (synchronous) build it is an empty,
+/// blanket-implemented marker that imposes no extra requirement.
+#[cfg(feature = "no-tty")]
+pub trait MaybeSendSync: Send + Sync {}
+#[cfg(feature = "no-tty")]
+impl<T: Send + Sync + ?Sized> MaybeSendSync for T {}
+
+/// See the `no-tty` variant for the rationale. In the default build this marker
+/// adds no bounds.
+#[cfg(not(feature = "no-tty"))]
+pub trait MaybeSendSync {}
+#[cfg(not(feature = "no-tty"))]
+impl<T: ?Sized> MaybeSendSync for T {}
+
 mod core_editor;
 pub use core_editor::{Editor, LineBuffer};
 
