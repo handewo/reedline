@@ -1272,12 +1272,12 @@ impl Painter {
         let sender = sender.clone();
         // let mut buf: Vec<_> = buf.drain(..).collect();
         let mut buf: Vec<_> = std::mem::take(buf);
-        tokio::spawn(async move {
-            if !buf.is_empty() {
+        if !buf.is_empty() {
+            tokio::spawn(async move {
                 let _ = sender.write_all(&buf).await;
                 buf.clear();
-            }
-        });
+            });
+        }
         Ok(())
     }
 
