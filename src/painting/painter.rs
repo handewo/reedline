@@ -1273,7 +1273,7 @@ impl Painter {
         // let mut buf: Vec<_> = buf.drain(..).collect();
         let mut buf: Vec<_> = std::mem::take(buf);
         if !buf.is_empty() {
-            let h = tokio::task::spawn_blocking(move || {
+            let h = std::thread::spawn(move || {
                 let _ = sender.blocking_write_all(&buf);
             });
             let _ = h.join();
