@@ -1275,7 +1275,6 @@ impl Painter {
         if !buf.is_empty() {
             tokio::spawn(async move {
                 let _ = sender.write_all(&buf).await;
-                buf.clear();
             });
         }
         Ok(())
