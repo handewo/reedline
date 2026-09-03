@@ -9,6 +9,8 @@ use crate::{
     history::SearchFilter,
     menu_functions::{parse_selection_char, ParseAction},
 };
+#[cfg(not(feature = "no-tty"))]
+use crossterm::terminal;
 #[cfg(feature = "external_printer")]
 use {
     crate::external_printer::ExternalPrinter,
@@ -43,7 +45,6 @@ use {
     crossterm::{
         event,
         event::{Event, KeyCode, KeyEvent, KeyModifiers},
-        terminal,
     },
     std::{
         fs::File,
@@ -372,7 +373,7 @@ impl Reedline {
         let painter = Painter::new(W::terminal());
         #[cfg(all(not(test), feature = "no-tty"))]
         let painter = Painter::new(
-            W::terminal(term_backend.clone(), stdout),
+            W::terminal(term_backend.clone(), stdout.clone()),
             term_backend.clone(),
         );
         #[cfg(test)]
@@ -422,7 +423,10 @@ impl Reedline {
             abbreviations: HashMap::new(),
             buffer_editor: None,
             cursor_shapes: None,
+            #[cfg(not(feature = "no-tty"))]
             bracketed_paste: BracketedPasteGuard::default(),
+            #[cfg(feature = "no-tty")]
+            bracketed_paste: BracketedPasteGuard::default().with_writer(stdout),
             kitty_protocol: KittyProtocolGuard::default(),
             immediately_accept: false,
             break_signal: None,
@@ -455,7 +459,6 @@ impl Reedline {
     ///
     /// At this point most terminals should support it or ignore the setting of the necessary
     /// flags. For full compatibility, keep it disabled.
-    #[cfg(not(feature = "no-tty"))]
     pub fn use_bracketed_paste(mut self, enable: bool) -> Self {
         self.bracketed_paste.set(enable);
         self
@@ -969,15 +972,17 @@ impl Reedline {
         #[cfg(not(feature = "no-tty"))]
         {
             terminal::enable_raw_mode()?;
-            self.bracketed_paste.enter();
             self.kitty_protocol.enter();
         }
 
+        self.bracketed_paste.enter().await;
+
         let result = self.read_line_helper(prompt).await;
+
+        self.bracketed_paste.exit().await;
 
         #[cfg(not(feature = "no-tty"))]
         {
-            self.bracketed_paste.exit();
             self.kitty_protocol.exit();
         }
 
