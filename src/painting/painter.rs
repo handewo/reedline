@@ -1439,7 +1439,7 @@ impl Painter {
         // batch of messages, not per message, so the flicker the comment above
         // guards against is unaffected.
         self.stdout.flush()?;
-        self.prompt_start_row = match self.stdout.cursor_position().await {
+        self.prompt_start_row = match self.stdout.cursor_position() {
             // Measured, so later paints can skip the drift check.
             Ok((_, actual)) => PromptStartRow::Verified(actual),
             // No answer, so all that is left is the count this function stopped

@@ -82,5 +82,8 @@ jobs:
         with:
           toolchain: "1.95"
 
-      - name: Check the library builds on the MSRV
-        run: cargo check --locked --all-features
+      - name: Check the library builds on the MSRV without no-tty
+        run: cargo check --locked --features bashisms,external_printer,sqlite,sqlite-dynlib,system_clipboard,libc
+          
+      - name: Check the no-tty builds on the MSRV
+        run: cargo check --locked --features no-tty
