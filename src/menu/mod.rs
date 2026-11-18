@@ -716,6 +716,7 @@ impl Menu for ReedlineMenu {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "no-tty"))]
 mod tests {
     use super::*;
     use crate::DefaultCompleter;

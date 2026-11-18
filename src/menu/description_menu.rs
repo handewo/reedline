@@ -730,6 +730,7 @@ impl Menu for DescriptionMenu {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "no-tty"))]
 mod tests {
     use super::*;
     use crate::painting::{Painter, W};

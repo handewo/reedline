@@ -860,6 +860,7 @@ impl Menu for ColumnarMenu {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "no-tty"))]
 mod tests {
     use crate::painting::W;
 

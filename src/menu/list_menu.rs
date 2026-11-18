@@ -699,6 +699,7 @@ fn count_digits(mut n: usize) -> u16 {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "no-tty"))]
 mod tests {
     use crate::{painting::W, CompletionResult, Span};
 

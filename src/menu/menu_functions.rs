@@ -1026,6 +1026,7 @@ pub(crate) fn truncate_with_ansi(s: &str, max_width: usize) -> Cow<'_, str> {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "no-tty"))]
 mod tests {
     use super::*;
     use crate::PromptHelixMode;

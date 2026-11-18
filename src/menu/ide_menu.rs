@@ -1158,6 +1158,7 @@ fn truncate_string_list(list: &mut [String], truncation_chars: &str) {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "no-tty"))]
 mod tests {
     use crate::painting::W;
     use crate::{Span, UndoBehavior};

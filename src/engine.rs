@@ -581,8 +581,10 @@ impl Reedline {
             W::terminal(term_backend.clone(), stdout.clone()),
             term_backend.clone(),
         );
-        #[cfg(test)]
+        #[cfg(all(test, not(feature = "no-tty")))]
         let painter = Painter::new(W::sink());
+        #[cfg(all(test, feature = "no-tty"))]
+        let painter = Painter::new(W::sink(), term_backend.clone());
         let buffer_highlighter = Box::<ExampleHighlighter>::default();
         let visual_selection_style = Style::new().on(Color::LightGray);
         let completer = Box::<DefaultCompleter>::default();

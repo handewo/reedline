@@ -315,9 +315,13 @@ impl W {
                     Ok(())
                 }
                 #[cfg(test)]
-                W::Sink(w) => w.flush(),
+                W::Sink(w, _) => w.flush(),
                 #[cfg(test)]
                 W::Capture(w) => w.flush(),
+                #[cfg(test)]
+                W::FailOnce(w, ..) => w.flush(),
+                #[cfg(test)]
+                W::Screen(w, _) => w.flush(),
             }
         }
     }
@@ -1197,7 +1201,15 @@ impl Painter {
 
             Ok(())
         })();
-        let ended = self.end_frame().and_then(|()| self.stdout.flush());
+        // Close the frame, then drain it: under `no-tty` the sync `W::flush`
+        // is a no-op, so only the async `flush_out` actually sends the frame
+        // to the channel-backed writer. A sync flush here left every repaint
+        // buffered until some other method drained it (nothing at all, from
+        // the ssh demo's point of view, until Enter ran `print_crlf`).
+        let ended = match self.end_frame() {
+            Ok(()) => self.stdout.flush_out().await,
+            err => err,
+        };
         painted.and(ended)
     }
 
@@ -1880,11 +1892,13 @@ impl Painter {
             .queue(SetCursorStyle::DefaultUserShape)?
             .queue(Show)?;
 
-        let W::Terminal {
-            term_backend: _,
-            sender,
-            ref mut buf,
-        } = &mut self.stdout;
+        let (sender, buf) = match &mut self.stdout {
+            W::Terminal { sender, buf, .. } => (sender, buf),
+            // The test writers exist only under `cfg(test)`, where this
+            // restore never runs; the arm keeps the match exhaustive.
+            #[cfg(test)]
+            _ => unreachable!("restore_cursor_shape on a non-terminal writer"),
+        };
 
         let sender = sender.clone();
         let buf: Vec<_> = std::mem::take(buf);
@@ -2181,7 +2195,85 @@ impl Painter {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "no-tty"))]
 mod screen_tests;
+
+/// The rebase onto v0.53.0 restructured `repaint_buffer` to close with a sync
+/// `W::flush` (upstream #1254's synchronized frame). Under `no-tty` that flush
+/// is a no-op — the frame only reaches the channel-backed `SenderWriter` in
+/// the async `W::flush_out` — so every repaint sat in `W::Terminal.buf` until
+/// some other method (`print_crlf` on Enter) happened to drain it. Seen from
+/// the ssh demo as: no prompt, no echo, then everything at once after Enter.
+#[cfg(all(test, feature = "no-tty"))]
+mod no_tty_tests {
+    use super::*;
+    use crate::PromptHistorySearch;
+    use std::borrow::Cow;
+
+    struct TestPrompt;
+
+    impl Prompt for TestPrompt {
+        fn render_prompt_left(&self) -> Cow<'_, str> {
+            ">>> ".into()
+        }
+
+        fn render_prompt_right(&self) -> Cow<'_, str> {
+            "".into()
+        }
+
+        fn render_prompt_indicator(&self, _prompt_mode: PromptEditMode) -> Cow<'_, str> {
+            "".into()
+        }
+
+        fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+            "".into()
+        }
+
+        fn render_prompt_history_search_indicator(
+            &self,
+            _prompt_search: PromptHistorySearch,
+        ) -> Cow<'_, str> {
+            "".into()
+        }
+    }
+
+    #[tokio::test]
+    async fn repaint_buffer_drains_its_frame_to_the_sender() {
+        let (_input_tx, input_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+        let (pty, _query_rx) = crossterm::event::NoTtyEvent::new(input_rx);
+        let writer = crossterm::event::SenderWriter::new(output_tx);
+        let mut painter = Painter::new(W::terminal(pty.clone(), writer), pty);
+        painter.terminal_size = (20, 10);
+        // A verified anchor keeps the repaint off the cursor-query path, which
+        // no test host is here to answer.
+        painter.prompt_start_row.mark_verified(0);
+
+        let lines = PromptLines {
+            prompt_str_left: Cow::Borrowed(">>> "),
+            prompt_str_right: Cow::Borrowed(""),
+            prompt_indicator: Cow::Borrowed(""),
+            before_cursor: Cow::Borrowed("hi"),
+            after_cursor: Cow::Borrowed(""),
+            hint: Cow::Borrowed(""),
+            right_prompt_on_last_line: false,
+            exit_after_cursor: None,
+            status: Cow::Borrowed(""),
+        };
+
+        painter
+            .repaint_buffer(&TestPrompt, &lines, PromptEditMode::Default, None, false, &None)
+            .await
+            .expect("repaint_buffer failed");
+
+        let drained = output_rx
+            .try_recv()
+            .expect("repaint_buffer left its frame undrained in W::Terminal.buf");
+        assert!(!drained.is_empty());
+        // The prompt itself must be among the bytes sent.
+        assert!(drained.iter().any(|&b| b == b'>'));
+    }
+}
 
 #[cfg(test)]
 #[cfg(not(feature = "no-tty"))]
